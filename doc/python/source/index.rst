@@ -32,6 +32,8 @@ Generic functionality
 Native math functionality
 -------------------------
 
+Functionality that is available directly on the NPU with no data processing on the host.
+
 .. automodule:: qant_native_computing_toolkit.native
    :members:
    :imported-members:

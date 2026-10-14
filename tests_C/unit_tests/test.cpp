@@ -34,54 +34,70 @@ TEST_CASE("init release")
     REQUIRE(q_generic::release_npu(0) == 0);
 }
 
-TEST_CASE("mul_f32")
+TEST_CASE("memory_allocate_and_free")
 {
+    auto handle = q_generic::npu_allocate(0, 2, 3, q_generic::QantDataRole::Weights);
+    REQUIRE(handle != nullptr);
 
-    std::vector<float> us = {0.5, 0.2, 0.3, 0.4};
-    std::vector<float> vs = {0.5, 0.3, 0.2, 0.1};
-    auto us_tensor = vector_to_dltensor<float>(us);
-    auto vs_tensor = vector_to_dltensor<float>(vs);
-
-    auto ws_dltensor = q_native::mul_npu_f32(0, &us_tensor, &vs_tensor);
+    REQUIRE(q_generic::npu_free(handle) == 0);
     REQUIRE(q_generic::release_npu(0) == 0);
-    REQUIRE(ws_dltensor != nullptr);
-    auto ws = tensor_to_vector_view<float>(ws_dltensor);
-
-    auto atol = 0.002;
-    for (int i = 0; i < 3; ++i)
-    {
-        CHECK_THAT(ws[i], Catch::Matchers::WithinAbs(us[i] * vs[i], atol));
-    }
-
-    us_tensor.deleter(&us_tensor);
-    vs_tensor.deleter(&vs_tensor);
-    ws_dltensor->deleter(ws_dltensor);
 }
 
-TEST_CASE("mul_i16")
+TEST_CASE("memory_upload_and_download")
 {
-    std::vector<int16_t> us = {500, 200, 300, 400};
-    std::vector<int16_t> vs = {500, 300, 200, 100};
-    auto us_tensor = vector_to_dltensor<std::int16_t>(us);
-    auto vs_tensor = vector_to_dltensor<std::int16_t>(vs);
+    auto rows = 2;
+    auto cols = 3;
+    Tensor mat = xt::random::rand({rows, cols}, -1.0, 1.0);
+    auto mat_dltensor = xarray_to_dltensor(mat);
 
-    auto ws_dltensor = q_native::mul_npu_i16(0, &us_tensor, &vs_tensor);
+    auto handle = q_generic::npu_allocate(0, rows, cols, q_generic::QantDataRole::Features);
+    REQUIRE(handle != nullptr);
+
+    REQUIRE(q_generic::npu_upload_into(handle, &mat_dltensor) == 0);
+
+    auto downloaded_dltensor = q_generic::npu_download(handle);
+    REQUIRE(downloaded_dltensor != nullptr);
+    auto downloaded = dltensor_to_tensor_view(downloaded_dltensor);
+
+    REQUIRE(xt::allclose(downloaded, mat, 0.0, 0.0));
+
+    mat_dltensor.deleter(&mat_dltensor);
+    downloaded_dltensor->deleter(downloaded_dltensor);
+    REQUIRE(q_generic::npu_free(handle) == 0);
     REQUIRE(q_generic::release_npu(0) == 0);
-    REQUIRE(ws_dltensor != nullptr);
-    auto ws = tensor_to_vector_view<std::int16_t>(ws_dltensor);
-
-    auto atol = 0.002;
-    for (int i = 0; i < 3; ++i)
-    {
-        CHECK_THAT(ws[i], Catch::Matchers::WithinAbs((us[i] * vs[i]) / 1000, atol));
-    }
-
-    us_tensor.deleter(&us_tensor);
-    vs_tensor.deleter(&vs_tensor);
-    ws_dltensor->deleter(ws_dltensor);
 }
 
-TEST_CASE("mul_bf16")
+TEST_CASE("linear_fprop_preloaded")
+{
+    auto n_channels_out = 4;
+    auto n_channels_in = 3;
+    auto n_batches = 3;
+
+    Tensor weights = xt::random::rand({n_channels_out, n_channels_in}, -1.0, 1.0);
+    Tensor features = xt::random::rand({n_batches, n_channels_in}, -1.0, 1.0);
+    auto weights_dltensor = xarray_to_dltensor(weights);
+    auto features_dltensor = xarray_to_dltensor(features);
+
+    auto weights_handle = q_generic::npu_allocate(0, n_channels_out, n_channels_in, q_generic::QantDataRole::Weights);
+    auto features_handle = q_generic::npu_upload(0, &features_dltensor, q_generic::QantDataRole::Features);
+    auto result_handle = q_generic::npu_allocate(0, n_batches, n_channels_out, q_generic::QantDataRole::Features);
+    REQUIRE(weights_handle != nullptr);
+    REQUIRE(features_handle != nullptr);
+    REQUIRE(result_handle != nullptr);
+
+    REQUIRE(q_generic::npu_upload_into(weights_handle, &weights_dltensor) == 0);
+
+    REQUIRE(q_native::linear_fprop_preloaded(features_handle, weights_handle, result_handle) == 0);
+
+    weights_dltensor.deleter(&weights_dltensor);
+    features_dltensor.deleter(&features_dltensor);
+    REQUIRE(q_generic::npu_free(weights_handle) == 0);
+    REQUIRE(q_generic::npu_free(features_handle) == 0);
+    REQUIRE(q_generic::npu_free(result_handle) == 0);
+    REQUIRE(q_generic::release_npu(0) == 0);
+}
+
+TEST_CASE("mul_elementwise")
 {
     Tensor us = xt::random::rand({100}, -1.0, 1.0);
     Tensor vs = xt::random::rand({100}, -1.0, 1.0);
@@ -138,37 +154,116 @@ TEST_CASE("linear_fprop")
     result_qant_dltensor->deleter(result_qant_dltensor);
 }
 
+TEST_CASE("linear_fprop_preloaded_weights")
+{
+    auto n_channels_in = 10;
+    auto n_channels_out = 20;
+    auto n_batches = 3;
+
+    Tensor weights = xt::random::rand({n_channels_out, n_channels_in}, -1.0, 1.0);
+    auto weights_dltensor = xarray_to_dltensor(weights);
+
+    auto weights_handle = q_generic::npu_upload(0, &weights_dltensor, q_generic::QantDataRole::Weights);
+    REQUIRE(weights_handle != nullptr);
+
+    // upload the weights once and reuse them for two consecutive forward passes
+    for (int i = 0; i < 2; i++)
+    {
+        Tensor features = xt::random::rand({n_batches, n_channels_in}, -1.0, 1.0);
+        auto features_dltensor = xarray_to_dltensor(features);
+
+        auto result_qant_dltensor = q_native::linear_fprop_preloaded_weights(&features_dltensor, weights_handle);
+        REQUIRE(result_qant_dltensor != nullptr);
+        auto result_qant = dltensor_to_tensor_view(result_qant_dltensor);
+
+        auto result_shouldbe = xt::linalg::tensordot(features, weights, {1}, {1});
+        REQUIRE(result_qant.shape() == result_shouldbe.shape());
+        REQUIRE(xt::allclose(result_qant, result_shouldbe, 0.0, 0.025));
+
+        features_dltensor.deleter(&features_dltensor);
+        result_qant_dltensor->deleter(result_qant_dltensor);
+    }
+
+    REQUIRE(q_generic::npu_free(weights_handle) == 0);
+    REQUIRE(q_generic::release_npu(0) == 0);
+    weights_dltensor.deleter(&weights_dltensor);
+}
+
 TEST_CASE("conv_fprop")
 {
     Tensor features = xt::random::rand({1, 12, 3, 4}, -1.0, 1.0);
-    Tensor filter = xt::random::rand({3, 12, 5, 6}, -1.0, 1.0);
+    Tensor weights = xt::random::rand({3, 12, 5, 6}, -1.0, 1.0);
 
     auto features_dltensor = xarray_to_dltensor(features);
-    auto filter_dltensor = xarray_to_dltensor(filter);
+    auto weights_dltensor = xarray_to_dltensor(weights);
 
-    auto qant_res_dltensor = q_ai::conv_fprop(0, &features_dltensor, &filter_dltensor, 2, 3, 1);
+    auto qant_res_dltensor = q_ai::conv_fprop(0, &features_dltensor, &weights_dltensor, 2, 3, 1);
     REQUIRE(q_generic::release_npu(0) == 0);
     REQUIRE(qant_res_dltensor != nullptr);
 
     features_dltensor.deleter(&features_dltensor);
-    filter_dltensor.deleter(&filter_dltensor);
+    weights_dltensor.deleter(&weights_dltensor);
     qant_res_dltensor->deleter(qant_res_dltensor);
 }
 
 TEST_CASE("conv_transpose_fprop")
 {
     Tensor features = xt::random::rand({1, 12, 3, 4}, -1.0, 1.0);
-    Tensor filter = xt::random::rand({12, 3, 5, 6}, -1.0, 1.0);
+    Tensor weights = xt::random::rand({12, 3, 5, 6}, -1.0, 1.0);
 
     auto features_dltensor = xarray_to_dltensor(features);
-    auto filter_dltensor = xarray_to_dltensor(filter);
+    auto weights_dltensor = xarray_to_dltensor(weights);
 
-    auto qant_res_dltensor = q_ai::conv_transpose_fprop(0, &features_dltensor, &filter_dltensor, 2, 3, 1, 0);
+    auto qant_res_dltensor = q_ai::conv_transpose_fprop(0, &features_dltensor, &weights_dltensor, 2, 3, 1, 0);
     REQUIRE(q_generic::release_npu(0) == 0);
     REQUIRE(qant_res_dltensor != nullptr);
 
     features_dltensor.deleter(&features_dltensor);
-    filter_dltensor.deleter(&filter_dltensor);
+    weights_dltensor.deleter(&weights_dltensor);
+    qant_res_dltensor->deleter(qant_res_dltensor);
+}
+
+TEST_CASE("conv_fprop_preloaded_weights")
+{
+    Tensor features = xt::random::rand({1, 12, 3, 4}, -1.0, 1.0);
+    Tensor weights = xt::random::rand({3, 12, 5, 6}, -1.0, 1.0);
+
+    auto features_dltensor = xarray_to_dltensor(features);
+    auto weights_dltensor = xarray_to_dltensor(weights);
+
+    auto weights_handle = q_ai::upload_conv_weights(0, &weights_dltensor);
+    REQUIRE(weights_handle != nullptr);
+
+    auto qant_res_dltensor = q_ai::conv_fprop_preloaded_weights(&features_dltensor, weights_handle, 2, 3, 1);
+    REQUIRE(qant_res_dltensor != nullptr);
+
+    REQUIRE(q_ai::conv_weights_free(weights_handle) == 0);
+    REQUIRE(q_generic::release_npu(0) == 0);
+
+    features_dltensor.deleter(&features_dltensor);
+    weights_dltensor.deleter(&weights_dltensor);
+    qant_res_dltensor->deleter(qant_res_dltensor);
+}
+
+TEST_CASE("conv_transpose_fprop_preloaded_weights")
+{
+    Tensor features = xt::random::rand({1, 12, 3, 4}, -1.0, 1.0);
+    Tensor weights = xt::random::rand({12, 3, 5, 6}, -1.0, 1.0);
+
+    auto features_dltensor = xarray_to_dltensor(features);
+    auto weights_dltensor = xarray_to_dltensor(weights);
+
+    auto weights_handle = q_ai::upload_conv_transpose_weights(0, &weights_dltensor);
+    REQUIRE(weights_handle != nullptr);
+
+    auto qant_res_dltensor = q_ai::conv_transpose_fprop_preloaded_weights(&features_dltensor, weights_handle, 2, 3, 1, 0);
+    REQUIRE(qant_res_dltensor != nullptr);
+
+    REQUIRE(q_ai::conv_transpose_weights_free(weights_handle) == 0);
+    REQUIRE(q_generic::release_npu(0) == 0);
+
+    features_dltensor.deleter(&features_dltensor);
+    weights_dltensor.deleter(&weights_dltensor);
     qant_res_dltensor->deleter(qant_res_dltensor);
 }
 

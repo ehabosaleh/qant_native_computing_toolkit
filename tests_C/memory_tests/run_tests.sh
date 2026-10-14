@@ -10,6 +10,8 @@ echo
 echo "build done, executing tests..."
 valgrind --leak-check=full --show-leak-kinds=all --show-reachable=no --error-exitcode=1 ./test_memory_safety
 echo 
-valgrind --leak-check=full --show-leak-kinds=all --show-reachable=no --error-exitcode=1 ./test_memory_safety_i16
+valgrind --leak-check=full --show-leak-kinds=all --show-reachable=no --error-exitcode=1 ./test_memory_safety_mul_elementwise
 echo 
 valgrind --leak-check=full --show-leak-kinds=all --show-reachable=no --error-exitcode=1 ./test_memory_safety_mat
+echo
+valgrind --leak-check=full --show-leak-kinds=all --show-reachable=no --error-exitcode=1 ./test_memory_safety_linear_fprop_preloaded

@@ -9,7 +9,7 @@ on: workflow_call
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # deploy-pages reports the published URL through the github-pages environment
     environment:
       name: github-pages

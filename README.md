@@ -41,6 +41,10 @@ Documentation for the latest release can be found [here](https://q-ant-gmbh.gith
 
 A collection of examples can be found in this separate [repo](https://github.com/Q-ANT-GmbH/qant_native_computing_toolkit_examples).
 
+## Community
+
+Please join us in the [Discussions](https://github.com/Q-ANT-GmbH/qant_native_computing_toolkit/discussions/) section of this repo for announcements and Q&A.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, feature requests, the PR process, and how to build and test the project.

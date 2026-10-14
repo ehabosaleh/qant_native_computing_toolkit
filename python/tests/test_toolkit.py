@@ -26,39 +26,15 @@ def test_init():
     q_generic.release_npu(0)
 
 
-def check_mul32(rng):
-    # factored out of the test to be used in different tests
-    us = rng.random(1000).astype(np.float32)
-    vs = rng.random(1000).astype(np.float32)
-    ws = q_native.mul_f32(us, vs)
-    assert_allclose(ws, us * vs, atol=0.03)
-    mean_err = np.mean(np.abs(ws - us * vs))
-    assert_array_less(mean_err, 0.004)
-
-
-def test_mulf32(rng):
-    check_mul32(rng)
-
-
-@pytest.mark.parametrize(
-    "features_shape", [(10), ((10, 2)), ((10, 2, 3)), ((10, 2, 3, 4))]
-)
-def test_muli16(features_shape, rng):
-    us = rng.uniform(-1_000, 1_000, size=features_shape).astype(np.int16)
-    vs = rng.uniform(-1_000, 1_000, size=features_shape).astype(np.int16)
-    ws = q_native.mul_i16(us, vs)
-
-    assert_allclose(
-        ws.astype(bfloat16) / 1_000,
-        us.astype(bfloat16) / 1_000 * vs.astype(bfloat16) / 1_000,
-        atol=0.01,
-    )
-
-
 @pytest.mark.parametrize(
     "features_shape", [(10), ((10, 2)), ((10, 2, 3)), ((10, 2, 3, 4))]
 )
 def test_mul(features_shape, rng):
+    check_mul(rng, features_shape)
+
+
+def check_mul(rng, features_shape=1000):
+    # factored out of the test to be used in different tests
     us = rng.uniform(-1.0, 1.0, size=features_shape).astype(bfloat16)
     vs = rng.uniform(-1.0, 1.0, size=features_shape).astype(bfloat16)
     ws = q_native.mul_elementwise(us, vs)
@@ -74,15 +50,15 @@ def test_mul(features_shape, rng):
     "us, exception",
     [
         ([0.1, 0.2, 0.3], TypeError),
-        (np.array([0.1, 0.2, 0.2]).astype(np.float64), TypeError),
-        (np.array([[0.1, 0.2, 0.2], [0.3, 0.2, 0.1]]).astype(np.float32), ValueError),
-        (np.array([0.1, 0.2, 0.3, 0.4]).astype(np.float32), ValueError),
+        (np.array([0.1, 0.2, 0.2]).astype(np.float32), TypeError),
+        (np.array([[0.1, 0.2, 0.2], [0.3, 0.2, 0.1]]).astype(bfloat16), ValueError),
+        (np.array([0.1, 0.2, 0.3, 0.4]).astype(bfloat16), ValueError),
     ],
 )
-def test_mul_f32_errors(us, exception):
-    vs = np.array([0.1, 0.2, 0.2]).astype(np.float32)
+def test_mul_errors(us, exception):
+    vs = np.array([0.1, 0.2, 0.2]).astype(bfloat16)
     with pytest.raises(exception):
-        q_native.mul_f32(us, vs)
+        q_native.mul_elementwise(us, vs)
 
 
 @pytest.mark.parametrize(
@@ -162,7 +138,30 @@ def test_linear_fprop_einsum(features_shape, weights_shape, rng):
 
 
 @pytest.mark.parametrize(
-    "features_shape, filter_shape, low, high, padding, stride, dilation, tol_kwargs",
+    "features_shape, weights_shape",
+    [
+        ((500,), (200, 500)),
+        ((1, 500), (200, 500)),
+        ((1, 2, 3, 500), (200, 500)),
+        ((10, 500), (200, 500)),
+    ],
+)
+def test_linear_fprop_preloaded_weights(features_shape, weights_shape, rng):
+    # upload the weights once and reuse them for two consecutive forward passes
+    weights = rng.uniform(-1.0, 1.0, size=weights_shape).astype(bfloat16)
+    weights_handle = q_generic.upload(weights, q_generic.DataRole.Weights, device_id=0)
+
+    for _ in range(2):
+        features = rng.uniform(-1.0, 1.0, size=features_shape).astype(bfloat16)
+        res_qant = q_ai.linear_fprop_preloaded_weights(features, weights_handle)
+
+        assert_equal(res_qant.shape, (*features_shape[:-1], weights_shape[0]))
+        # same computation as the non-preloaded variant
+        assert_equal(res_qant, q_ai.linear_fprop(features, weights))
+
+
+@pytest.mark.parametrize(
+    "features_shape, weights_shape, low, high, padding, stride, dilation, tol_kwargs",
     [
         ((100, 1, 1), (200, 100, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
         ((1, 100, 1, 1), (200, 100, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
@@ -176,7 +175,7 @@ def test_linear_fprop_einsum(features_shape, weights_shape, rng):
 )
 def test_conv_fprop(
     features_shape,
-    filter_shape,
+    weights_shape,
     low,
     high,
     padding,
@@ -187,18 +186,18 @@ def test_conv_fprop(
 ):
     # TODO: dilation != 1
     features = rng.uniform(low, high, size=features_shape).astype(bfloat16)
-    filter = rng.uniform(low, high, size=filter_shape).astype(bfloat16)
+    weights = rng.uniform(low, high, size=weights_shape).astype(bfloat16)
     res_qant = q_ai.conv_fprop(
-        features, filter, padding=padding, stride=stride, dilation=dilation
+        features, weights, padding=padding, stride=stride, dilation=dilation
     )
 
     features_torch = utils.numpy2torchbfloat(features)
-    filter_torch = utils.numpy2torchbfloat(filter)
+    weights_torch = utils.numpy2torchbfloat(weights)
     if len(features_shape) == 3:
         res_torch = utils.torch2numpybfloat(
             torch.nn.functional.conv2d(
                 features_torch[torch.newaxis, ...],
-                filter_torch,
+                weights_torch,
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -208,7 +207,7 @@ def test_conv_fprop(
         res_torch = utils.torch2numpybfloat(
             torch.nn.functional.conv2d(
                 features_torch,
-                filter_torch,
+                weights_torch,
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -220,7 +219,97 @@ def test_conv_fprop(
 
 
 @pytest.mark.parametrize(
-    "features_shape, filter_shape, low, high, padding, stride, dilation, tol_kwargs",
+    "features_shape, weights_shape, low, high, padding, stride, dilation, tol_kwargs",
+    [
+        ((100, 1, 1), (200, 100, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
+        ((1, 100, 1, 1), (200, 100, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
+        ((1, 100, 1, 1), (200, 100, 1, 1), 0, 1.0, 0, 3, 1, {"rtol": 0.05}),
+        ((1, 1, 3, 3), (1, 1, 3, 3), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
+        ((1, 2, 3, 3), (1, 2, 3, 3), 0, 1.0, 0, 1, 1, {"atol": 0.05}),
+        ((1, 3, 4, 4), (10, 3, 2, 2), -0.1, 0.1, 0, 1, 1, {"atol": 0.01}),
+        ((1, 3, 4, 4), (10, 3, 3, 2), -0.1, 0.1, 0, 1, 1, {"atol": 0.01}),
+        ((1, 3, 4, 4), (10, 3, 2, 3), -0.1, 0.1, 0, 1, 1, {"atol": 0.01}),
+    ],
+)
+def test_conv_fprop_preloaded_weights(
+    features_shape,
+    weights_shape,
+    low,
+    high,
+    padding,
+    stride,
+    dilation,
+    tol_kwargs,
+    rng,
+):
+    features = rng.uniform(low, high, size=features_shape).astype(bfloat16)
+    weights = rng.uniform(low, high, size=weights_shape).astype(bfloat16)
+    weights_handle = q_ai.upload_conv_weights(weights, device_id=0)
+    res_qant = q_ai.conv_fprop_preloaded_weights(
+        features, weights_handle, padding=padding, stride=stride, dilation=dilation
+    )
+
+    features_torch = utils.numpy2torchbfloat(features)
+    weights_torch = utils.numpy2torchbfloat(weights)
+    if len(features_shape) == 3:
+        res_torch = utils.torch2numpybfloat(
+            torch.nn.functional.conv2d(
+                features_torch[torch.newaxis, ...],
+                weights_torch,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+        )[0]
+    else:
+        res_torch = utils.torch2numpybfloat(
+            torch.nn.functional.conv2d(
+                features_torch,
+                weights_torch,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+        )
+
+    assert_equal(res_qant.shape, res_torch.shape)
+    assert_allclose(res_qant, res_torch, **tol_kwargs)
+
+
+@pytest.mark.parametrize(
+    "features_shape, weights_shape, padding, stride",
+    [
+        ((1, 3, 4, 4), (10, 3, 2, 2), 0, 1),
+        ((2, 3, 5, 4), (10, 3, 3, 2), 1, 2),
+    ],
+)
+def test_conv_fprop_preloaded_weights_consecutive(
+    features_shape, weights_shape, padding, stride, rng
+):
+    # upload the weights once and reuse them for two consecutive convolutions
+    weights = rng.uniform(-0.1, 0.1, size=weights_shape).astype(bfloat16)
+    weights_handle = q_ai.upload_conv_weights(weights, device_id=0)
+
+    for _ in range(2):
+        features = rng.uniform(-0.1, 0.1, size=features_shape).astype(bfloat16)
+        res_qant = q_ai.conv_fprop_preloaded_weights(
+            features, weights_handle, padding=padding, stride=stride, dilation=1
+        )
+
+        res_torch = utils.torch2numpybfloat(
+            torch.nn.functional.conv2d(
+                utils.numpy2torchbfloat(features),
+                utils.numpy2torchbfloat(weights),
+                stride=stride,
+                padding=padding,
+            )
+        )
+        assert_equal(res_qant.shape, res_torch.shape)
+        assert_allclose(res_qant, res_torch, atol=0.01)
+
+
+@pytest.mark.parametrize(
+    "features_shape, weights_shape, low, high, padding, stride, dilation, tol_kwargs",
     [
         ((10, 1, 1), (10, 20, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
         ((1, 10, 1, 1), (10, 20, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
@@ -233,7 +322,7 @@ def test_conv_fprop(
 )
 def test_conv_transpose_fprop(
     features_shape,
-    filter_shape,
+    weights_shape,
     low,
     high,
     padding,
@@ -243,11 +332,11 @@ def test_conv_transpose_fprop(
     rng,
 ):
     features = rng.uniform(low, high, size=features_shape).astype(bfloat16)
-    filter = rng.uniform(low, high, size=filter_shape).astype(bfloat16)
+    weights = rng.uniform(low, high, size=weights_shape).astype(bfloat16)
 
     res_qant = q_ai.conv_transpose_fprop(
         features,
-        filter,
+        weights,
         padding=padding,
         stride=stride,
         dilation=dilation,
@@ -255,11 +344,11 @@ def test_conv_transpose_fprop(
     )
 
     features_torch = utils.numpy2torchbfloat(features)
-    filter_torch = utils.numpy2torchbfloat(filter)
+    weights_torch = utils.numpy2torchbfloat(weights)
     if len(features_shape) == 3:
         res_torch = torch.nn.functional.conv_transpose2d(
             features_torch[torch.newaxis, ...],
-            filter_torch,
+            weights_torch,
             stride=stride,
             padding=padding,
             dilation=dilation,
@@ -268,7 +357,7 @@ def test_conv_transpose_fprop(
     else:
         res_torch = torch.nn.functional.conv_transpose2d(
             features_torch,
-            filter_torch,
+            weights_torch,
             stride=stride,
             padding=padding,
             dilation=dilation,
@@ -277,6 +366,85 @@ def test_conv_transpose_fprop(
 
     assert_equal(res_qant.shape, res_torch.shape)
     assert_allclose(res_qant, utils.torch2numpybfloat(res_torch), **tol_kwargs)
+
+
+@pytest.mark.parametrize(
+    "features_shape, weights_shape, low, high, padding, stride, dilation, tol_kwargs",
+    [
+        ((10, 1, 1), (10, 20, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
+        ((1, 10, 1, 1), (10, 20, 1, 1), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
+        ((1, 10, 3, 3), (10, 20, 2, 2), 0, 1.0, 0, 1, 1, {"rtol": 0.05}),
+        ((1, 10, 3, 3), (10, 20, 2, 2), 0, 1.0, 0, 2, 1, {"rtol": 0.05}),
+        ((1, 10, 3, 3), (10, 20, 2, 2), 0, 1.0, 0, 3, 1, {"rtol": 0.05}),
+        ((1, 10, 3, 3), (10, 20, 2, 1), 0, 1.0, 0, 3, 1, {"rtol": 0.05}),
+        ((1, 10, 3, 3), (10, 20, 1, 2), 0, 1.0, 0, 3, 1, {"rtol": 0.05}),
+    ],
+)
+def test_conv_transpose_fprop_preloaded_weights(
+    features_shape, weights_shape, low, high, padding, stride, dilation, tol_kwargs, rng
+):
+    features = rng.uniform(low, high, size=features_shape).astype(bfloat16)
+    weights = rng.uniform(low, high, size=weights_shape).astype(bfloat16)
+    weights_handle = q_ai.upload_conv_transpose_weights(weights, device_id=0)
+    res_qant = q_ai.conv_transpose_fprop_preloaded_weights(
+        features,
+        weights_handle,
+        padding=padding,
+        stride=stride,
+        dilation=dilation,
+        output_padding=0,
+    )
+
+    features_torch = utils.numpy2torchbfloat(features)
+    if len(features_shape) == 3:
+        features_torch = features_torch[torch.newaxis, ...]
+    res_torch = torch.nn.functional.conv_transpose2d(
+        features_torch,
+        utils.numpy2torchbfloat(weights),
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+    )
+    if len(features_shape) == 3:
+        res_torch = res_torch[0]
+
+    assert_equal(res_qant.shape, res_torch.shape)
+    assert_allclose(res_qant, utils.torch2numpybfloat(res_torch), rtol=0.05)
+
+
+@pytest.mark.parametrize(
+    "features_shape, weights_shape, padding, stride",
+    [
+        ((1, 10, 3, 3), (10, 20, 2, 2), 0, 1),
+        ((1, 10, 3, 3), (10, 20, 1, 2), 0, 3),
+    ],
+)
+def test_conv_transpose_fprop_preloaded_weights_consecutive(
+    features_shape, weights_shape, padding, stride, rng
+):
+    # upload the weights once and reuse them for two consecutive transposed convolutions
+    weights = rng.uniform(0, 1.0, size=weights_shape).astype(bfloat16)
+    weights_handle = q_ai.upload_conv_transpose_weights(weights, device_id=0)
+
+    for _ in range(2):
+        features = rng.uniform(0, 1.0, size=features_shape).astype(bfloat16)
+        res_qant = q_ai.conv_transpose_fprop_preloaded_weights(
+            features,
+            weights_handle,
+            padding=padding,
+            stride=stride,
+            dilation=1,
+            output_padding=0,
+        )
+
+        res_torch = torch.nn.functional.conv_transpose2d(
+            utils.numpy2torchbfloat(features),
+            utils.numpy2torchbfloat(weights),
+            stride=stride,
+            padding=padding,
+            dilation=1,
+        )
+        assert_allclose(res_qant, utils.torch2numpybfloat(res_torch), rtol=0.05)
 
 
 @pytest.mark.parametrize(
@@ -325,13 +493,13 @@ def test_calc_scaled_periodic_nl_fprop(rng):
 
 
 def test_mul_nonlin_swap(rng):
-    check_mul32(rng)
-    check_mul32(rng)
+    check_mul(rng)
+    check_mul(rng)
     check_calc_scaled_periodic_nl_fprop(rng)
     check_calc_scaled_periodic_nl_fprop(rng)
-    check_mul32(rng)
+    check_mul(rng)
     check_calc_scaled_periodic_nl_fprop(rng)
-    check_mul32(rng)
+    check_mul(rng)
     check_calc_scaled_periodic_nl_fprop(rng)
 
 
@@ -355,8 +523,12 @@ def test_kan_layer(rng):
             * ampls_layer0[:, :, k_idx],
             axis=1,
         )
+    # normalize to [-1, 1] to disentangle tolerance from magnitude
+    norm_factor = np.max(np.abs(res_cpu))
+    res_cpu = res_cpu / norm_factor
+    res_npu = res_npu / norm_factor
     assert_allclose(res_npu, res_cpu, atol=0.26)
-    assert_array_less(np.mean(np.abs(res_npu - res_cpu)), 0.08)
+    assert_array_less(np.mean(np.abs(res_npu - res_cpu)), 0.025)
 
 
 def test_kan_layer_batched(rng):
@@ -634,6 +806,123 @@ def test_service_info():
 def test_get_available_npus():
     npus = q_generic.get_available_npus()
     assert len(npus.keys()) > 0
+
+
+def test_allocate_and_drop_matrix():
+    q_generic.allocate(2, 3, q_generic.DataRole.Weights, device_id=0)
+
+
+def _allocate_then_upload(matrix, data_role, device_id):
+    handle = q_generic.allocate(
+        matrix.shape[0], matrix.shape[1], data_role, device_id=device_id
+    )
+    q_generic.upload_into(matrix, handle)
+    return handle
+
+
+def test_upload_and_download_matrix():
+    rows, cols = 2, 3
+    data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).astype(bfloat16).reshape(rows, cols)
+
+    handle = q_generic.upload(data, q_generic.DataRole.Features)
+    downloaded = q_generic.download(handle)
+    assert_equal(downloaded, data)
+
+
+@pytest.mark.parametrize(
+    "upload_fn, provide_result_handle",
+    [
+        (_allocate_then_upload, False),
+        (q_generic.upload, False),
+        (q_generic.upload, True),
+    ],
+)
+def test_linear_fprop_preloaded(upload_fn, provide_result_handle):
+    rows, cols, vector_rows = 4, 3, 3
+    matrix = (
+        np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0])
+        .astype(bfloat16)
+        .reshape(rows, cols)
+    )
+    vectors = (
+        np.array([0.0, 1.0, 0.5, 0.0, 1.0, 0.5, 0.5, 0.5, 0.5])
+        .astype(bfloat16)
+        .reshape(vector_rows, cols)
+    )
+
+    handle_matrix = upload_fn(matrix, q_generic.DataRole.Weights, device_id=0)
+    handle_vector = upload_fn(vectors, q_generic.DataRole.Features, device_id=0)
+
+    if provide_result_handle:
+        handle_result = q_generic.allocate(
+            vector_rows, rows, q_generic.DataRole.Features, device_id=0
+        )
+        returned_handle = q_ai.linear_fprop_preloaded(
+            handle_vector, handle_matrix, handle_result
+        )
+        assert returned_handle is handle_result
+    else:
+        handle_result = q_ai.linear_fprop_preloaded(handle_vector, handle_matrix)
+
+    result = q_generic.download(handle_result)  # no need to check the result
+    assert_equal(result.shape, (vector_rows, rows))
+
+
+@pytest.mark.parametrize(
+    "n_rows, n_columns, n_vecs, n_rows2, n_avg",
+    [
+        (1, 1, 5, 1, 10),
+        (3, 4, 5, 10, 2),
+        (3, 15, 5, 10, 3),
+        (15, 3, 5, 10, 5),
+        (15, 3, 1, 10, 9),
+        (18, 18, 5, 10, 16),
+        (50, 100, 2, 10, 32),
+    ],
+)
+def test_linear_fprop_preloaded_persistent_mem(
+    n_rows, n_columns, n_vecs, n_rows2, n_avg, rng
+):
+    # chains two batched matrix-vector multiplications that reuse the same
+    # persistent device memory handles across n_avg repeats, averaging the
+    # (noisy) hardware results to compare against a CPU reference
+    matrix = rng.uniform(-1.0, 1.0, size=(n_rows, n_columns)).astype(bfloat16)
+    vectors = rng.uniform(-1.0, 1.0, size=(n_vecs, n_columns)).astype(bfloat16)
+    matrix2 = rng.uniform(-1.0, 1.0, size=(n_rows2, n_rows)).astype(bfloat16)
+
+    handle_matrix = q_generic.upload(matrix, q_generic.DataRole.Weights, device_id=0)
+    handle_vector = q_generic.upload(vectors, q_generic.DataRole.Features, device_id=0)
+    handle_result = q_generic.allocate(
+        n_vecs, n_rows, q_generic.DataRole.Features, device_id=0
+    )
+    handle_matrix2 = q_generic.upload(matrix2, q_generic.DataRole.Weights, device_id=0)
+    handle_result2 = q_generic.allocate(
+        n_vecs, n_rows2, q_generic.DataRole.Features, device_id=0
+    )
+
+    q_info.reset_perf_counter(0)
+    results = np.zeros((n_avg, n_vecs, n_rows2), dtype=np.float32)
+    for i in range(n_avg):
+        q_ai.linear_fprop_preloaded(handle_vector, handle_matrix, handle_result)
+        q_ai.linear_fprop_preloaded(handle_result, handle_matrix2, handle_result2)
+        results[i] = q_generic.download(handle_result2).astype(np.float32)
+
+    mean_result = results.mean(axis=0)
+    assert_equal(mean_result.shape, (n_vecs, n_rows2))
+
+    intermediate_shouldbe = utils.torch2numpybfloat(
+        torch.nn.functional.linear(
+            utils.numpy2torchbfloat(vectors), utils.numpy2torchbfloat(matrix)
+        )
+    )
+    res_shouldbe = utils.torch2numpybfloat(
+        torch.nn.functional.linear(
+            utils.numpy2torchbfloat(intermediate_shouldbe),
+            utils.numpy2torchbfloat(matrix2),
+        )
+    ).astype(np.float32)
+
+    assert_allclose(mean_result, res_shouldbe, rtol=0.05, atol=0.05)
 
 
 def test_performance_measurement():

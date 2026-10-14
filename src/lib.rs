@@ -6,6 +6,7 @@ pub mod data_structures;
 pub mod errors;
 mod global_settings;
 pub mod linear;
+pub mod memory_management;
 pub mod non_linear;
 pub mod norm;
 pub mod pooling;
@@ -14,8 +15,6 @@ mod python_bridge;
 mod qant_driver_import;
 pub mod utils;
 
-use crate::data_format_conversion::to_bf16s;
-use crate::data_format_conversion::to_f32s;
 use crate::data_structures::QantTensor1;
 use errors::ToolkitError;
 
@@ -47,24 +46,14 @@ pub fn mul_elementwise_bf16<'a, 'b>(
     QantTensor1::new(ws, *us.shape())
 }
 
-/// Multiplies elementwise us and vs
-pub fn mul_elementwise_f32(
-    npu_id: u32,
-    us: &[f32],
-    vs: &[f32],
-) -> Result<Vec<f32>, errors::ToolkitError> {
-    Ok(to_f32s(&qant_driver_import::driver_mul(
-        npu_id,
-        &to_bf16s(us),
-        &to_bf16s(vs),
-    )?))
-}
-
 #[cfg(test)]
 mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
-    use crate::{reset_perf_counter, utils::test_utils::assert_almost_equal_vec};
+    use crate::{
+        data_format_conversion::to_bf16s, reset_perf_counter,
+        utils::test_utils::assert_almost_equal_vec,
+    };
 
     use super::*;
 
@@ -83,17 +72,23 @@ mod tests {
                 // all threads want to work on npu 0
                 let n_numbers = 1e4 as usize;
                 let mut rng = StdRng::seed_from_u64(12345);
-                let us: Vec<f32> = (0..n_numbers)
-                    .map(|_| rng.random_range(-1.0..1.0))
-                    .collect();
-                let vs: Vec<f32> = (0..n_numbers)
-                    .map(|_| rng.random_range(-1.0..1.0))
-                    .collect();
+                let us = to_bf16s(
+                    &(0..n_numbers)
+                        .map(|_| rng.random_range(-1.0f32..1.0))
+                        .collect::<Vec<_>>(),
+                );
+                let vs = to_bf16s(
+                    &(0..n_numbers)
+                        .map(|_| rng.random_range(-1.0f32..1.0))
+                        .collect::<Vec<_>>(),
+                );
                 let tol = 0.01;
 
-                let res = mul_elementwise_f32(0, &us, &vs).unwrap();
-                let expected: Vec<_> = us.iter().zip(vs).map(|(&u, v)| u * v).collect();
-                assert_almost_equal_vec(&res, &expected, tol);
+                let us_tensor = QantTensor1::new(&us, [n_numbers]).unwrap();
+                let vs_tensor = QantTensor1::new(&vs, [n_numbers]).unwrap();
+                let res = mul_elementwise_bf16(0, &us_tensor, &vs_tensor).unwrap();
+                let expected: Vec<_> = us.iter().zip(&vs).map(|(&u, &v)| u * v).collect();
+                assert_almost_equal_vec(res.data(), &expected, tol);
             });
 
             handles.push(handle);

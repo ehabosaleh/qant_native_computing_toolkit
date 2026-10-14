@@ -35,7 +35,7 @@ env:
 
 jobs:
   build_whl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15   
 
     strategy:
@@ -168,7 +168,7 @@ jobs:
         retention-days: 1
 
   test_whl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build_whl
     timeout-minutes: 15
     strategy:
@@ -287,7 +287,7 @@ jobs:
           mypy ./python/
 
   upload_whl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [test_whl, test_whl_native]
     # The default (real-driver) wheels only exist on trusted runs; skip on cpu-backend-only (fork) runs.
     if: ${{ contains(fromJSON(inputs.features), 'default') }}

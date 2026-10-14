@@ -1,5 +1,6 @@
 use crate::qant_driver_import::{
-    C_STRING_DEFAULT_LENGTH, PerformanceCounterInfo, QantDeviceInfo, QantDriverError,
+    C_STRING_DEFAULT_LENGTH, PerformanceCounterInfo, QantDataRole, QantDeviceInfo, QantDriverError,
+    QantDriverHandle,
 };
 use half::bf16;
 use libc::c_char;
@@ -51,6 +52,41 @@ unsafe extern "C" {
         vs: *const bf16,
         output: *mut bf16,
         len: usize,
+    ) -> QantDriverError;
+}
+
+#[link(name = "qant_native_computing_driver")]
+unsafe extern "C" {
+    pub fn qant_driver_allocate(
+        npu_id: u32,
+        rows: usize,
+        cols: usize,
+        data_role: QantDataRole,
+        out_handle: *mut QantDriverHandle,
+    ) -> QantDriverError;
+}
+
+#[link(name = "qant_native_computing_driver")]
+unsafe extern "C" {
+    pub fn qant_driver_free(handle: QantDriverHandle) -> QantDriverError;
+}
+
+#[link(name = "qant_native_computing_driver")]
+unsafe extern "C" {
+    pub fn qant_driver_upload(handle: QantDriverHandle, data_c: *const bf16) -> QantDriverError;
+}
+
+#[link(name = "qant_native_computing_driver")]
+unsafe extern "C" {
+    pub fn qant_driver_download(handle: QantDriverHandle, output_c: *mut bf16) -> QantDriverError;
+}
+
+#[link(name = "qant_native_computing_driver")]
+unsafe extern "C" {
+    pub fn qant_driver_mul_matrix_vec_batched_mem(
+        handle_matrix: QantDriverHandle,
+        handle_vector: QantDriverHandle,
+        handle_result: QantDriverHandle,
     ) -> QantDriverError;
 }
 

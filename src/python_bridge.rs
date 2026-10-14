@@ -1,6 +1,6 @@
 //! Module to expose some selected functions to python.
 use half::bf16;
-use numpy::ndarray::{Array, Array1};
+use numpy::ndarray::Array;
 use numpy::{
     IntoPyArray, PyArray, PyArray1, PyArray2, PyArray4, PyArrayMethods, PyReadonlyArray,
     PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArray4, PyUntypedArrayMethods,
@@ -15,6 +15,8 @@ type Feature = crate::global_settings::Value;
 
 use crate::data_structures::QantTensor;
 use crate::errors::ToolkitError;
+use crate::memory_management::QantMemoryHandle as RustQantMemoryHandle;
+use crate::qant_driver_import::QantDataRole;
 use crate::utils;
 
 impl From<ToolkitError> for PyErr {
@@ -115,22 +117,52 @@ fn linear_fprop<'py>(
 fn conv_fprop<'py>(
     py: Python<'py>,
     npu_id: u32,
-    feature_arr: PyReadonlyArray4<'py, Feature>,
-    filter_arr: PyReadonlyArray4<'py, Feature>,
+    features_arr: PyReadonlyArray4<'py, Feature>,
+    weights_arr: PyReadonlyArray4<'py, Feature>,
     padding: usize,
     stride: usize,
     dilation: usize,
 ) -> PyResult<Bound<'py, PyArray4<Feature>>> {
-    let feature_data = pyarray_to_qant_tensor(&feature_arr)?;
-    let filter_data = pyarray_to_qant_tensor(&filter_arr)?;
+    let features_data = pyarray_to_qant_tensor(&features_arr)?;
+    let weights_data = pyarray_to_qant_tensor(&weights_arr)?;
 
-    let conv_attrs = crate::conv::ConvAttributes {
-        padding,
-        stride,
-        dilation,
-    };
+    let conv_attrs = crate::conv::ConvAttributes::new(padding, stride, dilation)?;
 
-    let res = crate::conv::conv_fprop(npu_id, &feature_data, &filter_data, conv_attrs)?;
+    let res = crate::conv::conv_fprop(npu_id, &features_data, &weights_data, conv_attrs)?;
+
+    qant_tensor_to_pyarray(py, res)
+}
+
+#[pyfunction]
+fn upload_conv_weights<'py>(
+    npu_id: u32,
+    weights_arr: PyReadonlyArray4<'py, Feature>,
+) -> PyResult<PyConvWeightsHandle> {
+    let weights_data = pyarray_to_qant_tensor(&weights_arr)?;
+
+    let handle = crate::conv::upload_conv_weights(npu_id, &weights_data)?;
+
+    Ok(PyConvWeightsHandle { inner: handle })
+}
+
+#[pyfunction]
+fn conv_fprop_preloaded_weights<'py>(
+    py: Python<'py>,
+    features_arr: PyReadonlyArray4<'py, Feature>,
+    weights_handle: &PyConvWeightsHandle,
+    padding: usize,
+    stride: usize,
+    dilation: usize,
+) -> PyResult<Bound<'py, PyArray4<Feature>>> {
+    let features_data = pyarray_to_qant_tensor(&features_arr)?;
+
+    let conv_attrs = crate::conv::ConvAttributes::new(padding, stride, dilation)?;
+
+    let res = crate::conv::conv_fprop_preloaded_weights(
+        &features_data,
+        &weights_handle.inner,
+        conv_attrs,
+    )?;
 
     qant_tensor_to_pyarray(py, res)
 }
@@ -139,24 +171,56 @@ fn conv_fprop<'py>(
 fn conv_transpose_fprop<'py>(
     py: Python<'py>,
     npu_id: u32,
-    feature_arr: PyReadonlyArray4<'py, Feature>,
-    filter_arr: PyReadonlyArray4<'py, Feature>,
+    features_arr: PyReadonlyArray4<'py, Feature>,
+    weights_arr: PyReadonlyArray4<'py, Feature>,
     padding: usize,
     stride: usize,
     dilation: usize,
     output_padding: usize,
 ) -> PyResult<Bound<'py, PyArray4<Feature>>> {
-    let feature_data = pyarray_to_qant_tensor(&feature_arr)?;
-    let filter_data = pyarray_to_qant_tensor(&filter_arr)?;
+    let features_data = pyarray_to_qant_tensor(&features_arr)?;
+    let weights_data = pyarray_to_qant_tensor(&weights_arr)?;
 
-    let conv_attrs = crate::conv::ConvTransposeAttributes {
-        padding,
-        stride,
-        dilation,
-        output_padding,
-    };
+    let conv_attrs =
+        crate::conv::ConvTransposeAttributes::new(padding, stride, dilation, output_padding)?;
 
-    let res = crate::conv::conv_transpose_fprop(npu_id, &feature_data, &filter_data, conv_attrs)?;
+    let res = crate::conv::conv_transpose_fprop(npu_id, &features_data, &weights_data, conv_attrs)?;
+
+    qant_tensor_to_pyarray(py, res)
+}
+
+#[pyfunction]
+fn upload_conv_transpose_weights<'py>(
+    npu_id: u32,
+    weights_arr: PyReadonlyArray4<'py, Feature>,
+) -> PyResult<PyConvTransposeWeightsHandle> {
+    let weights_data = pyarray_to_qant_tensor(&weights_arr)?;
+
+    let handle = crate::conv::upload_conv_transpose_weights(npu_id, &weights_data)?;
+
+    Ok(PyConvTransposeWeightsHandle { inner: handle })
+}
+
+#[pyfunction]
+fn conv_transpose_fprop_preloaded_weights<'py>(
+    py: Python<'py>,
+    features_arr: PyReadonlyArray4<'py, Feature>,
+    weights_handle: &PyConvTransposeWeightsHandle,
+    padding: usize,
+    stride: usize,
+    dilation: usize,
+    output_padding: usize,
+) -> PyResult<Bound<'py, PyArray4<Feature>>> {
+    let features_data = pyarray_to_qant_tensor(&features_arr)?;
+
+    let conv_attrs =
+        crate::conv::ConvTransposeAttributes::new(padding, stride, dilation, output_padding)?;
+
+    let res = crate::conv::conv_transpose_fprop_preloaded_weights(
+        &features_data,
+        &weights_handle.inner,
+        conv_attrs,
+    )?;
 
     qant_tensor_to_pyarray(py, res)
 }
@@ -240,21 +304,6 @@ fn calc_kan_layer_fprop<'py>(
         crate::non_linear::calc_kan_layer(npu_id, &feature_data, &phis_data, &ampls_data, &ks)?;
 
     qant_tensor_to_pyarray(py, res)
-}
-
-#[pyfunction]
-fn mul_f32<'py>(
-    py: Python<'py>,
-    npu_id: u32,
-    us: PyReadonlyArray1<'py, f32>,
-    vs: PyReadonlyArray1<'py, f32>,
-) -> PyResult<Bound<'py, PyArray1<f32>>> {
-    let us_slice = pyarray_to_slice(&us)?;
-    let vs_slice = pyarray_to_slice(&vs)?;
-
-    let res = crate::mul_elementwise_f32(npu_id, us_slice, vs_slice)?;
-    let res_array = Array1::from_vec(res);
-    Ok(res_array.into_pyarray(py))
 }
 
 #[pyfunction]
@@ -425,6 +474,147 @@ fn adaptive_avgpool2d_fprop<'py>(
     qant_tensor_to_pyarray(py, res)
 }
 
+#[pyclass(name = "DataRole", eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PyDataRole {
+    Weights,
+    Features,
+}
+
+impl From<PyDataRole> for QantDataRole {
+    fn from(value: PyDataRole) -> Self {
+        match value {
+            PyDataRole::Weights => QantDataRole::Weights,
+            PyDataRole::Features => QantDataRole::Features,
+        }
+    }
+}
+
+#[pyclass(name = "QantMemoryHandle")]
+struct PyQantMemoryHandle {
+    inner: RustQantMemoryHandle,
+}
+
+#[pymethods]
+impl PyQantMemoryHandle {
+    #[getter]
+    fn npu_id(&self) -> u32 {
+        self.inner.npu_id()
+    }
+
+    #[getter]
+    fn rows(&self) -> usize {
+        self.inner.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.inner.cols()
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        (self.inner.rows(), self.inner.cols())
+    }
+}
+
+#[pyclass(name = "ConvWeightsHandle")]
+struct PyConvWeightsHandle {
+    inner: crate::conv::ConvWeightsHandle,
+}
+
+#[pymethods]
+impl PyConvWeightsHandle {
+    #[getter]
+    fn npu_id(&self) -> u32 {
+        self.inner.npu_id()
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize, usize, usize) {
+        let [out_channels, in_channels, height, width] = self.inner.shape();
+        (out_channels, in_channels, height, width)
+    }
+}
+
+#[pyclass(name = "ConvTransposeWeightsHandle")]
+struct PyConvTransposeWeightsHandle {
+    inner: crate::conv::ConvTransposeWeightsHandle,
+}
+
+#[pymethods]
+impl PyConvTransposeWeightsHandle {
+    #[getter]
+    fn npu_id(&self) -> u32 {
+        self.inner.npu_id()
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize, usize, usize) {
+        let [in_channels, out_channels, height, width] = self.inner.shape();
+        (in_channels, out_channels, height, width)
+    }
+}
+
+impl From<RustQantMemoryHandle> for PyQantMemoryHandle {
+    fn from(val: RustQantMemoryHandle) -> Self {
+        PyQantMemoryHandle { inner: val }
+    }
+}
+
+#[pyfunction]
+fn allocate(
+    npu_id: u32,
+    rows: usize,
+    cols: usize,
+    data_role: PyDataRole,
+) -> PyResult<PyQantMemoryHandle> {
+    Ok(RustQantMemoryHandle::allocate(npu_id, rows, cols, data_role.into())?.into())
+}
+
+#[pyfunction]
+fn upload(
+    npu_id: u32,
+    data: PyReadonlyArray2<Feature>,
+    data_role: PyDataRole,
+) -> PyResult<PyQantMemoryHandle> {
+    let matrix_data = pyarray_to_qant_tensor(&data)?;
+    Ok(RustQantMemoryHandle::from_matrix(npu_id, &matrix_data, data_role.into())?.into())
+}
+
+#[pyfunction]
+fn upload_into(
+    data: PyReadonlyArray2<Feature>,
+    memory_handle: &PyQantMemoryHandle,
+) -> PyResult<()> {
+    let matrix_data = pyarray_to_qant_tensor(&data)?;
+    memory_handle.inner.upload(&matrix_data)?;
+    Ok(())
+}
+
+#[pyfunction]
+fn download<'py>(
+    py: Python<'py>,
+    memory_handle: &PyQantMemoryHandle,
+) -> PyResult<Bound<'py, PyArray2<Feature>>> {
+    let matrix = memory_handle.inner.download()?;
+    qant_tensor_to_pyarray(py, matrix)
+}
+
+#[pyfunction]
+fn linear_fprop_preloaded(
+    features_handle: &PyQantMemoryHandle,
+    weights_handle: &PyQantMemoryHandle,
+    result_handle: &PyQantMemoryHandle,
+) -> PyResult<()> {
+    crate::memory_management::mul_matrix_vec_batched_mem(
+        &weights_handle.inner,
+        &features_handle.inner,
+        &result_handle.inner,
+    )?;
+    Ok(())
+}
+
 #[pyfunction]
 fn get_sensor_info(py: Python, npu_id: u32) -> PyResult<Bound<PyDict>> {
     let info = crate::get_device_info(npu_id)?;
@@ -497,13 +687,15 @@ fn get_perf_counter(py: Python, npu_id: u32) -> PyResult<Bound<PyDict>> {
 #[pyo3(name = "_backend")]
 fn qant_native_computing_toolkit(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_npu, m)?)?;
-    m.add_function(wrap_pyfunction!(mul_f32, m)?)?;
     m.add_function(wrap_pyfunction!(mul, m)?)?;
     m.add_function(wrap_pyfunction!(release_npu, m)?)?;
     m.add_function(wrap_pyfunction!(setup_logging, m)?)?;
     m.add_function(wrap_pyfunction!(get_driver_info, m)?)?;
     m.add_function(wrap_pyfunction!(linear_fprop, m)?)?;
+    m.add_function(wrap_pyfunction!(linear_fprop_preloaded, m)?)?;
     m.add_function(wrap_pyfunction!(conv_fprop, m)?)?;
+    m.add_function(wrap_pyfunction!(upload_conv_weights, m)?)?;
+    m.add_function(wrap_pyfunction!(conv_fprop_preloaded_weights, m)?)?;
     m.add_function(wrap_pyfunction!(add_bias_fprop, m)?)?;
     m.add_function(wrap_pyfunction!(add_bias_for_conv2d_fprop, m)?)?;
     m.add_function(wrap_pyfunction!(calc_scaled_periodic_nl_fprop, m)?)?;
@@ -513,6 +705,8 @@ fn qant_native_computing_toolkit(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(batchnorm2d_fprop, m)?)?;
     m.add_function(wrap_pyfunction!(sigmoid_fprop, m)?)?;
     m.add_function(wrap_pyfunction!(conv_transpose_fprop, m)?)?;
+    m.add_function(wrap_pyfunction!(upload_conv_transpose_weights, m)?)?;
+    m.add_function(wrap_pyfunction!(conv_transpose_fprop_preloaded_weights, m)?)?;
     m.add_function(wrap_pyfunction!(maxpool2d_fprop, m)?)?;
     m.add_function(wrap_pyfunction!(avgpool2d_fprop, m)?)?;
     m.add_function(wrap_pyfunction!(adaptive_maxpool2d_fprop, m)?)?;
@@ -522,5 +716,13 @@ fn qant_native_computing_toolkit(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_available_npus, m)?)?;
     m.add_function(wrap_pyfunction!(reset_perf_counter, m)?)?;
     m.add_function(wrap_pyfunction!(get_perf_counter, m)?)?;
+    m.add_class::<PyDataRole>()?;
+    m.add_class::<PyQantMemoryHandle>()?;
+    m.add_class::<PyConvWeightsHandle>()?;
+    m.add_class::<PyConvTransposeWeightsHandle>()?;
+    m.add_function(wrap_pyfunction!(allocate, m)?)?;
+    m.add_function(wrap_pyfunction!(upload, m)?)?;
+    m.add_function(wrap_pyfunction!(upload_into, m)?)?;
+    m.add_function(wrap_pyfunction!(download, m)?)?;
     Ok(())
 }

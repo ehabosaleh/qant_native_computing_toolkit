@@ -1,3 +1,10 @@
+qant-native-computing-toolkit (2.4.0-0) stable; urgency=low
+
+  * Added memory management.
+  * Removed deprecated i16 and f32 functions.
+
+ -- Q.ANT GmbH <info@qant.de>  Fri, 11 Sep 2026 12:00:00 +0000
+
 qant-native-computing-toolkit (2.3.1-0) stable; urgency=low
 
   * Improved documentation

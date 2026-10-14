@@ -60,6 +60,20 @@ pub struct QantDeviceInfo {
     pub error: QantDriverError,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QantDataRole {
+    Weights = 0,
+    Features = 1,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct QantDriverHandle {
+    pub npu_id: u32,
+    pub key: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct VersionInfo {
     pub fw_version: String,
@@ -221,6 +235,50 @@ pub fn driver_scaled_periodic_nl(
     let res =
         wrap_c_function_of_two_arrays(backend::qant_driver_scaled_periodic_nl_npu)(npu_id, us, vs)?;
     Ok(res)
+}
+
+pub fn driver_allocate(
+    npu_id: u32,
+    rows: usize,
+    cols: usize,
+    data_role: QantDataRole,
+) -> Result<QantDriverHandle, ToolkitError> {
+    let mut out_handle = QantDriverHandle { npu_id, key: 0 };
+    let driver_err =
+        unsafe { backend::qant_driver_allocate(npu_id, rows, cols, data_role, &mut out_handle) };
+    driver_err_to_result(driver_err)?;
+    Ok(out_handle)
+}
+
+pub fn driver_free(handle: QantDriverHandle) -> Result<(), ToolkitError> {
+    let driver_err = unsafe { backend::qant_driver_free(handle) };
+    driver_err_to_result(driver_err)
+}
+
+pub fn driver_upload(handle: QantDriverHandle, data: &[bf16]) -> Result<(), ToolkitError> {
+    let driver_err = unsafe { backend::qant_driver_upload(handle, data.as_ptr()) };
+    driver_err_to_result(driver_err)
+}
+
+pub fn driver_download(handle: QantDriverHandle, len: usize) -> Result<Vec<bf16>, ToolkitError> {
+    let mut data = Vec::<bf16>::with_capacity(len);
+    let driver_err = unsafe { backend::qant_driver_download(handle, data.as_mut_ptr()) };
+    unsafe {
+        data.set_len(len);
+    }
+    driver_err_to_result(driver_err)?;
+    Ok(data)
+}
+
+pub fn driver_mul_matrix_vec_batched_mem(
+    matrix_handle: QantDriverHandle,
+    vector_handle: QantDriverHandle,
+    output_handle: QantDriverHandle,
+) -> Result<(), ToolkitError> {
+    let driver_err = unsafe {
+        backend::qant_driver_mul_matrix_vec_batched_mem(matrix_handle, vector_handle, output_handle)
+    };
+    driver_err_to_result(driver_err)
 }
 
 pub fn driver_get_version(npu_id: u32) -> Result<String, ToolkitError> {

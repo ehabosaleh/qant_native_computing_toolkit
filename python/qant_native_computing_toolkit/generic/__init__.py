@@ -1,3 +1,8 @@
+from .._backend import DataRole as DataRole
+from .._wrapper import allocate as allocate
+from .._wrapper import download as download
 from .._wrapper import get_available_npus as get_available_npus
 from .._wrapper import init_npu as init_npu
 from .._wrapper import release_npu as release_npu
+from .._wrapper import upload as upload
+from .._wrapper import upload_into as upload_into

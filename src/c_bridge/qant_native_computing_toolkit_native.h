@@ -1,13 +1,24 @@
 #ifndef QANT_NATIVE_COMPUTING_TOOLKIT_NATIVE_H
 #define QANT_NATIVE_COMPUTING_TOOLKIT_NATIVE_H
 
+/**
+ * @file
+ * @brief Native math functionality.
+ *
+ * Functionality that is available directly on the NPU with no data processing on the host.
+ */
+
 #include <stdint.h>
 
 #include <dlpack/dlpack.h>
 
+#include "qant_native_computing_toolkit_generic.h"
+
 #ifdef __cplusplus
 namespace qant_native_computing_toolkit::native
 {
+    using ::qant_native_computing_toolkit::generic::QantMemoryHandle;
+
     extern "C"
     {
 #endif
@@ -63,36 +74,42 @@ namespace qant_native_computing_toolkit::native
                                                DLManagedTensorVersioned const *weights);
 
         /**
-         * @brief Multiplies two 1D Tensors of float32 element-wise.
+         * @brief Same as linear_fprop(), but uses a weight matrix previously uploaded.
          *
-         * @deprecated Use mul_npu() with bfloat16 tensors instead.
+         * Use in combination with npu_upload() or npu_upload_into() (data role Weights).
+         * The operation is performed on the NPU the weights were uploaded to.
          *
-         * @param npu_id The identifier of the NPU on which to perform the operation.
-         * @param us The first input tensor. Must be 1D with data type float32, same
-         * length as vs.
-         * @param vs The second input tensor. Must be 1D with data type float32, same
-         * length as us.
-         * @return A 1D tensor containing the elementwise product, same length as
-         * input.
+         * @param features A 2D tensor with data type bfloat16 and shape
+         *        <tt>(n_batches, n_channels_in)</tt>.
+         * @param weights Handle to the weights with shape
+         *        <tt>(n_channels_out, n_channels_in)</tt>, as returned by npu_upload().
+         * @return A 2D tensor containing the result of the forward propagation with
+         *         shape <tt>(n_batches, n_channels_out)</tt>.
          */
-        DLManagedTensorVersioned *mul_npu_f32(const uint32_t npu_id, DLManagedTensorVersioned const *us,
-                                              DLManagedTensorVersioned const *vs);
+        DLManagedTensorVersioned *linear_fprop_preloaded_weights(DLManagedTensorVersioned const *features,
+                                                                 QantMemoryHandle const *weights);
 
         /**
-         * @brief Multiplies two 1D Tensors of int16 element-wise.
+         * @brief Same as linear_fprop(), but features, weights and result all live in device
+         * memory.
          *
-         * @deprecated Use mul_npu() with bfloat16 tensors instead.
+         * The features and weights must have been uploaded with npu_upload() or
+         * npu_upload_into() (data roles Features and Weights respectively). The result
+         * handle is not allocated by this function: it must be allocated beforehand, e.g.
+         * with npu_allocate(), on the same NPU and with data role Features.
+         * The operation is performed on the NPU the weights were uploaded to.
          *
-         * @param npu_id The identifier of the NPU on which to perform the operation.
-         * @param us The first input tensor. Must be data type int16, same
-         * length as vs.
-         * @param vs The second input tensor. Must be data type int16, same
-         * length as us.
-         * @return A 1D tensor containing the elementwise product, same length as
-         * input.
+         * @param features Handle to the features with shape
+         *        <tt>(n_batches, n_channels_in)</tt>.
+         * @param weights Handle to the weights with shape
+         *        <tt>(n_channels_out, n_channels_in)</tt>.
+         * @param result Pre-allocated handle to receive the result with shape
+         *        <tt>(n_batches, n_channels_out)</tt> and data role Features. Its previous
+         *        contents are overwritten.
+         * @return 0 if successful, or a negative error code.
          */
-        DLManagedTensorVersioned *mul_npu_i16(const uint32_t npu_id, DLManagedTensorVersioned const *us,
-                                              DLManagedTensorVersioned const *vs);
+        int linear_fprop_preloaded(QantMemoryHandle const *features, QantMemoryHandle const *weights,
+                                   QantMemoryHandle const *result);
 
 #ifdef __cplusplus
     } // extern "C"

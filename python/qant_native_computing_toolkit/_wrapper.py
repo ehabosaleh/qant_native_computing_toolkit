@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pathlib
-import warnings
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -20,6 +19,12 @@ def init_npu(id: int) -> None:
     """
     Initialises the Native Processing Unit. Optional, not necessary for computation.
 
+    NPUs are automatically initialised on the first operation that uses the specific device.
+    Within one process, concurrent operation calls on a single NPU are possible,
+    this creates a first-come first-serve queue.
+    A process has an exclusive lock on each NPU it initialised, NPUs can be released explicitly
+    to free devices for use by a different process, see :func:`release_npu`.
+
     Args:
         id: The identifier of the NPU that is to be initialised.
     """
@@ -30,68 +35,13 @@ def init_npu(id: int) -> None:
 def release_npu(id: int) -> None:
     """
     Releases an NPU and frees associated memory.
-    Only relevant if multiple users want to access the same device.
+    Only relevant if multiple processes want to access the same device.
 
     Args:
         id: The identifier of the NPU that is to be released.
     """
     assert_nonnegative_int(id)
     backend.release_npu(id)
-
-
-def mul_f32(us: np.ndarray, vs: np.ndarray, device_id: int = 0) -> np.ndarray:
-    """
-    Multiply two one-dimensional arrays element-wise.
-
-    Args:
-        us (np.ndarray): First input array, must be of type `np.float32`.
-        vs (np.ndarray): Second input array, must be of type `np.float32`.
-        device_id (int, optional): The identifier of the NPU on which the operation is performed.
-
-    Returns:
-        np.ndarray: A new array of the same shape as `us` and `vs`, containing the
-        element-wise product of the two input arrays, with type `np.float32`.
-    """
-
-    for input, input_name in zip([us, vs], ["us", "vs"]):
-        assert_np_type_dim(input, np.float32, 1, name=input_name)
-    assert_same_shape(us, vs, name_x="us", name_y="vs")
-    assert_nonnegative_int(device_id, name="device_id")
-
-    return backend.mul_f32(device_id, us, vs)
-
-
-def mul_i16(us: np.ndarray, vs: np.ndarray, device_id: int = 0) -> np.ndarray:
-    """
-    Multiply two arrays element-wise.
-
-    Args:
-        us (np.ndarray): First input array, must be of type `np.int16` and have same shape as vs.
-        vs (np.ndarray): Second input array, must be of type `np.int16` and have same shape as us.
-        device_id (int, optional): The identifier of the NPU on which the operation is performed.
-
-    Returns:
-        np.ndarray: A new array of the same shape as `us` and `vs`, containing the
-        element-wise product of the two input arrays, with type `np.int16`.
-    """
-    warnings.warn(
-        "`mul_i16` is deprecated, use `mul_elementwise` instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    for input, input_name in zip([us, vs], ["us", "vs"]):
-        assert_np_type_dim(input, np.int16, None, name=input_name)
-    assert_same_shape(us, vs, name_x="us", name_y="vs")
-    assert_nonnegative_int(device_id, name="device_id")
-
-    us_bf16, vs_bf16 = (us / 1_000).astype(bfloat16), (vs / 1_000).astype(bfloat16)
-
-    shape = us.shape
-
-    return (
-        backend.mul(device_id, us_bf16.reshape(-1), vs_bf16.reshape(-1)).reshape(shape)
-        * 1_000
-    ).astype(np.int16)
 
 
 def mul_elementwise(us: np.ndarray, vs: np.ndarray, device_id: int = 0) -> np.ndarray:
@@ -158,9 +108,40 @@ def linear_fprop(
     )
 
 
+def linear_fprop_preloaded_weights(
+    features: np.ndarray, weights_handle: backend.QantMemoryHandle
+) -> np.ndarray:
+    """
+    Same as :func:`linear_fprop`, but uses a weight matrix previously uploaded with
+    `upload` or `upload_into` (data_role=backend.DataRole.Weights).
+    The operation is performed on the NPU the weights were uploaded to.
+
+    Args:
+        features (np.ndarray): An ND array of input features with shape (<batch dimensions>, n_channels_in). Must be dtype=bfloat16.
+        weights_handle (backend.QantMemoryHandle): Handle holding the uploaded weights with shape (n_channels_out, n_channels_in).
+
+    Returns:
+        np.ndarray: An ND array containing the result of the forward propagation with shape (<batch dimensions>, n_channels_out).
+    """
+    original_shape = features.shape
+    features = features.reshape(-1, original_shape[-1])
+    assert_np_type_dim(features, bfloat16, 2, name="features")
+
+    if not features.shape[-1] == weights_handle.cols:
+        raise ValueError(
+            f"number of features ({features.shape[-1]}) != number of weights input channels ({weights_handle.cols})"
+        )
+
+    features_handle = upload(
+        features, backend.DataRole.Features, device_id=weights_handle.npu_id
+    )
+    result_handle = linear_fprop_preloaded(features_handle, weights_handle)
+    return download(result_handle).reshape(*original_shape[:-1], weights_handle.rows)
+
+
 def conv_fprop(
     features: np.ndarray,
-    kernels: np.ndarray,
+    weights: np.ndarray,
     padding: int,
     stride: int,
     dilation: int,
@@ -170,22 +151,22 @@ def conv_fprop(
     Performs a forward pass through a convolution layer.
 
     Args:
-        features (np.ndarray): A 3D array of input features with shape (n_channels_in, height, width) or a 4D array of input features with the shape (batches, n_channels_in, height, width). Must be dtype=bfloat16.
-        kernels (np.ndarray): A 4D array representing the filter with shape (n_channels_out, n_channels_in, height, width). Must be dtype=bfloat16.
+        features (np.ndarray): A 3D array of input features with shape (in_channels, height, width) or a 4D array of input features with the shape (n_batches, in_channels, height, width). Must be dtype=bfloat16.
+        weights (np.ndarray): A 4D array of weights with shape (out_channels, in_channels, height, width). Must be dtype=bfloat16.
         padding (int): Amount of padding added to the input features.
-        stride (int): Step size for moving the filter window over the input features.
-        dilation (int): Dilation ("zoom out") of the filter window.
+        stride (int): Step size for moving the kernel over the input features.
+        dilation (int): Dilation ("zoom out") of the kernel.
         device_id (int, optional): The identifier of the NPU on which the operation is performed.
 
     Returns:
-        np.ndarray: An ND array containing the result of the convolution with shape ([batches], n_channels_out, height, width).
+        np.ndarray: An ND array containing the result of the convolution with shape ([n_batches], out_channels, height_out, width_out).
     """
     assert_np_type_dim(features, bfloat16, [3, 4], name="features")
-    assert_np_type_dim(kernels, bfloat16, 4, name="kernels")
+    assert_np_type_dim(weights, bfloat16, 4, name="weights")
 
-    if not features.shape[-3] == kernels.shape[1]:
+    if not features.shape[-3] == weights.shape[1]:
         raise ValueError(
-            f"number of features ({features.shape[0]}) != number of kernels input channels ({kernels.shape[1]})"
+            f"in_channels in features ({features.shape[-3]}) != in_channels in weights ({weights.shape[1]})"
         )
 
     assert_nonnegative_int(padding, name="padding")
@@ -195,14 +176,74 @@ def conv_fprop(
 
     features_batched = features[np.newaxis, ...] if features.ndim == 3 else features
     result = backend.conv_fprop(
-        device_id, features_batched, kernels, padding, stride, dilation
+        device_id, features_batched, weights, padding, stride, dilation
+    )
+    return result[0] if features.ndim == 3 else result
+
+
+def upload_conv_weights(
+    weights: np.ndarray, device_id: int = 0
+) -> backend.ConvWeightsHandle:
+    """
+    Uploads convolution weights to device memory for repeated use with
+    `conv_fprop_preloaded_weights`.
+
+    Args:
+        weights (np.ndarray): A 4D array of weights with shape (out_channels, in_channels, height, width). Must be dtype=bfloat16.
+        device_id (int, optional): The identifier of the NPU on which the memory is allocated.
+
+    Returns:
+        backend.ConvWeightsHandle: A handle to the device memory holding the uploaded weights.
+    """
+    assert_np_type_dim(weights, bfloat16, 4, name="weights")
+    assert_nonnegative_int(device_id, name="device_id")
+
+    return backend.upload_conv_weights(device_id, weights)
+
+
+def conv_fprop_preloaded_weights(
+    features: np.ndarray,
+    weights_handle: backend.ConvWeightsHandle,
+    padding: int,
+    stride: int,
+    dilation: int,
+) -> np.ndarray:
+    """
+    Performs a forward pass through a convolution layer using weights previously
+    uploaded with `upload_conv_weights`. The operation is performed on the NPU the weights
+    were uploaded to.
+
+    Args:
+        features (np.ndarray): A 3D array of input features with shape (in_channels, height, width) or a 4D array of input features with the shape (n_batches, in_channels, height, width). Must be dtype=bfloat16.
+        weights_handle (backend.ConvWeightsHandle): Handle holding the uploaded weights.
+        padding (int): Amount of padding added to the input features.
+        stride (int): Step size for moving the kernel over the input features.
+        dilation (int): Dilation ("zoom out") of the kernel.
+
+    Returns:
+        np.ndarray: An ND array containing the result of the convolution with shape ([n_batches], out_channels, height_out, width_out).
+    """
+    assert_np_type_dim(features, bfloat16, [3, 4], name="features")
+
+    if not features.shape[-3] == weights_handle.shape[1]:
+        raise ValueError(
+            f"in_channels in features ({features.shape[-3]}) != in_channels in weights ({weights_handle.shape[1]})"
+        )
+
+    assert_nonnegative_int(padding, name="padding")
+    assert_nonnegative_int(stride, name="stride")
+    assert_nonnegative_int(dilation, name="dilation")
+
+    features_batched = features[np.newaxis, ...] if features.ndim == 3 else features
+    result = backend.conv_fprop_preloaded_weights(
+        features_batched, weights_handle, padding, stride, dilation
     )
     return result[0] if features.ndim == 3 else result
 
 
 def conv_transpose_fprop(
     features: np.ndarray,
-    kernels: np.ndarray,
+    weights: np.ndarray,
     padding: int,
     stride: int,
     dilation: int,
@@ -213,23 +254,23 @@ def conv_transpose_fprop(
     Performs a forward pass through a transposed convolution layer.
 
     Args:
-        features (np.ndarray): A 3D array of input features with shape (n_channels_in, height, width) or a 4D array of input features with the shape (batches, n_channels_in, height, width). Must be dtype=bfloat16.
-        kernels (np.ndarray): A 4D array representing the filter with shape (n_channels_in, n_channels_out, height, width). Must be dtype=bfloat16.
+        features (np.ndarray): A 3D array of input features with shape (in_channels, height, width) or a 4D array of input features with the shape (n_batches, in_channels, height, width). Must be dtype=bfloat16.
+        weights (np.ndarray): A 4D array of weights with shape (in_channels, out_channels, height, width). Must be dtype=bfloat16.
         padding (int): Amount of padding added to the input features.
-        stride (int): Step size for moving the filter window over the input features.
-        dilation (int): Dilation ("zoom out") of the filter window.
+        stride (int): Step size for moving the kernel over the input features.
+        dilation (int): Dilation ("zoom out") of the kernel.
         output_padding (int): Padding for the returned features.
         device_id (int, optional): The identifier of the NPU on which the operation is performed.
 
     Returns:
-        np.ndarray: An ND array containing the result of the transpose convolution with shape ([batches], n_channels_out, height, width).
+        np.ndarray: An ND array containing the result of the transpose convolution with shape ([n_batches], out_channels, height_out, width_out).
     """
     assert_np_type_dim(features, bfloat16, [3, 4], name="features")
-    assert_np_type_dim(kernels, bfloat16, 4, name="kernels")
+    assert_np_type_dim(weights, bfloat16, 4, name="weights")
 
-    if not features.shape[-3] == kernels.shape[0]:
+    if not features.shape[-3] == weights.shape[0]:
         raise ValueError(
-            f"number of features ({features.shape[-3]}) != number of kernels input channels ({kernels.shape[0]})"
+            f"in_channels in features ({features.shape[-3]}) != in_channels in weights ({weights.shape[0]})"
         )
 
     assert_nonnegative_int(padding, name="padding")
@@ -240,7 +281,70 @@ def conv_transpose_fprop(
 
     features_batched = features[np.newaxis, ...] if features.ndim == 3 else features
     result = backend.conv_transpose_fprop(
-        device_id, features_batched, kernels, padding, stride, dilation, output_padding
+        device_id, features_batched, weights, padding, stride, dilation, output_padding
+    )
+    return result[0] if features.ndim == 3 else result
+
+
+def upload_conv_transpose_weights(
+    weights: np.ndarray, device_id: int = 0
+) -> backend.ConvTransposeWeightsHandle:
+    """
+    Uploads transposed convolution weights to device memory for repeated use with
+    `conv_transpose_fprop_preloaded_weights`.
+
+    Args:
+        weights (np.ndarray): A 4D array of weights with shape (in_channels, out_channels, height, width). Must be dtype=bfloat16.
+        device_id (int, optional): The identifier of the NPU on which the memory is allocated.
+
+    Returns:
+        backend.ConvTransposeWeightsHandle: A handle to the device memory holding the uploaded weights.
+    """
+    assert_np_type_dim(weights, bfloat16, 4, name="weights")
+    assert_nonnegative_int(device_id, name="device_id")
+
+    return backend.upload_conv_transpose_weights(device_id, weights)
+
+
+def conv_transpose_fprop_preloaded_weights(
+    features: np.ndarray,
+    weights_handle: backend.ConvTransposeWeightsHandle,
+    padding: int,
+    stride: int,
+    dilation: int,
+    output_padding: int,
+) -> np.ndarray:
+    """
+    Performs a forward pass through a transposed convolution layer using weights
+    previously uploaded with `upload_conv_transpose_weights`. The operation is performed on
+    the NPU the weights were uploaded to.
+
+    Args:
+        features (np.ndarray): A 3D array of input features with shape (in_channels, height, width) or a 4D array of input features with the shape (n_batches, in_channels, height, width). Must be dtype=bfloat16.
+        weights_handle (backend.ConvTransposeWeightsHandle): Handle holding the uploaded weights.
+        padding (int): Amount of padding added to the input features.
+        stride (int): Step size for moving the kernel over the input features.
+        dilation (int): Dilation ("zoom out") of the kernel.
+        output_padding (int): Padding for the returned features.
+
+    Returns:
+        np.ndarray: An ND array containing the result of the transpose convolution with shape ([n_batches], out_channels, height_out, width_out).
+    """
+    assert_np_type_dim(features, bfloat16, [3, 4], name="features")
+
+    if not features.shape[-3] == weights_handle.shape[0]:
+        raise ValueError(
+            f"in_channels in features ({features.shape[-3]}) != in_channels in weights ({weights_handle.shape[0]})"
+        )
+
+    assert_nonnegative_int(padding, name="padding")
+    assert_nonnegative_int(stride, name="stride")
+    assert_nonnegative_int(dilation, name="dilation")
+    assert_nonnegative_int(output_padding, name="output_padding")
+
+    features_batched = features[np.newaxis, ...] if features.ndim == 3 else features
+    result = backend.conv_transpose_fprop_preloaded_weights(
+        features_batched, weights_handle, padding, stride, dilation, output_padding
     )
     return result[0] if features.ndim == 3 else result
 
@@ -604,6 +708,114 @@ def adaptive_avgpool2d_fprop(
         device_id, features_batched, output_height, output_width
     )
     return result[0] if features.ndim == 3 else result
+
+
+def _assert_is_data_role(data_role):
+    if not isinstance(data_role, backend.DataRole):
+        raise TypeError(
+            f"data_role must be a backend.DataRole, but is {type(data_role)!r}"
+        )
+
+
+def allocate(
+    rows: int, cols: int, data_role: backend.DataRole, device_id: int = 0
+) -> backend.QantMemoryHandle:
+    """
+    Allocates a block of device memory sized to hold a (rows, cols) matrix.
+
+    Args:
+        rows (int): Number of rows of the matrix the memory is sized for.
+        cols (int): Number of columns of the matrix the memory is sized for.
+        data_role (backend.DataRole): Role of the data. Weights or Features.
+        device_id (int, optional): The identifier of the device on which the memory is allocated.
+
+    Returns:
+        backend.QantMemoryHandle: A handle to the allocated device memory. The
+        underlying device memory is released automatically once the handle is
+        garbage collected or explicitly via del handle.
+    """
+    assert_nonnegative_int(rows, name="rows")
+    assert_nonnegative_int(cols, name="cols")
+    _assert_is_data_role(data_role)
+    assert_nonnegative_int(device_id, name="device_id")
+    return backend.allocate(device_id, rows, cols, data_role)
+
+
+def upload(
+    data: np.ndarray, data_role: backend.DataRole, device_id: int = 0
+) -> backend.QantMemoryHandle:
+    """
+    Allocates a block of device memory sized to hold the matrix and uploads the matrix to it.
+
+    Args:
+        data (np.ndarray): A 2D array with shape (rows, cols). Must be dtype=bfloat16.
+        data_role (backend.DataRole): Role of the data. Weights or Features.
+        device_id (int, optional): The identifier of the device on which the memory is allocated.
+
+    Returns:
+        backend.QantMemoryHandle: A handle to the allocated device memory with the matrix uploaded.
+    """
+    assert_np_type_dim(data, bfloat16, 2, name="data")
+    _assert_is_data_role(data_role)
+    assert_nonnegative_int(device_id, name="device_id")
+    return backend.upload(device_id, data, data_role)
+
+
+def upload_into(data: np.ndarray, handle: backend.QantMemoryHandle) -> None:
+    """
+    Uploads a matrix to a previously allocated block of device memory.
+
+    Args:
+        data (np.ndarray): A 2D array with shape (handle.rows, handle.cols). Must be dtype=bfloat16.
+        handle (backend.QantMemoryHandle): The handle to upload to.
+    """
+    assert_np_type_dim(data, bfloat16, 2, name="data")
+    backend.upload_into(data, handle)
+
+
+def download(handle: backend.QantMemoryHandle) -> np.ndarray:
+    """
+    Downloads the matrix currently stored in a block of device memory.
+
+    Args:
+        handle (backend.QantMemoryHandle): The handle to download from.
+
+    Returns:
+        np.ndarray: A 2D array with shape (handle.rows, handle.cols) and dtype=bfloat16.
+    """
+    return backend.download(handle)
+
+
+def linear_fprop_preloaded(
+    features_handle: backend.QantMemoryHandle,
+    weights_handle: backend.QantMemoryHandle,
+    result_handle: backend.QantMemoryHandle | None = None,
+) -> backend.QantMemoryHandle:
+    """
+    Same as :func:`linear_fprop`, but features, weights and result all live in device memory.
+    The features and weights must have been uploaded with `upload` or `upload_into`
+    (data_role=backend.DataRole.Features and backend.DataRole.Weights respectively).
+    The operation is performed on the NPU the weights were uploaded to.
+
+    Args:
+        features_handle (backend.QantMemoryHandle): Handle holding the features with shape (n_batches, n_channels_in).
+        weights_handle (backend.QantMemoryHandle): Handle holding the weights with shape (n_channels_out, n_channels_in).
+        result_handle (backend.QantMemoryHandle, optional): Handle to receive the result with shape
+            (n_batches, n_channels_out). If not provided, a new block of device memory is allocated and returned.
+
+    Returns:
+        backend.QantMemoryHandle: The handle holding the result.
+    """
+    if result_handle is None:
+        result_handle = backend.allocate(
+            weights_handle.npu_id,
+            features_handle.rows,
+            weights_handle.rows,
+            backend.DataRole.Features,
+        )
+
+    backend.linear_fprop_preloaded(features_handle, weights_handle, result_handle)
+    return result_handle
 
 
 def get_driver_info(device_id: int = 0) -> str:

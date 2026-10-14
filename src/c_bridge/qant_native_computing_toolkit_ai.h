@@ -80,17 +80,17 @@ namespace qant_native_computing_toolkit::ai
          *
          * @param npu_id The identifier of the NPU on which to perform the operation.
          * @param features: A 4D tensor with data type bfloat16 and shape (n_batches,
-         * n_channels_in, height, width)
-         * @param kernels: A 4D tensor with data type bfloat16 and shape (n_channels_out,
-         * n_channels_in, height, width)
+         * in_channels, height, width)
+         * @param weights: A 4D tensor with data type bfloat16 and shape (out_channels,
+         * in_channels, height, width)
          * @param padding: Amount of padding added to the input features.
-         * @param stride: Step size for moving the filter window over the input
+         * @param stride: Step size for moving the kernel over the input
          * features.
-         * @param dilation: Dilation ("zoom out") of the filter window.
-         * @return A 4D tensor containing the result of the convolution with shape (n_batches, n_channels_out, height, width)
+         * @param dilation: Dilation ("zoom out") of the kernel.
+         * @return A 4D tensor containing the result of the convolution with shape (n_batches, out_channels, height_out, width_out)
          */
         DLManagedTensorVersioned *conv_fprop(const uint32_t npu_id, DLManagedTensorVersioned const *features,
-                                             DLManagedTensorVersioned const *kernels,
+                                             DLManagedTensorVersioned const *weights,
                                              size_t const padding,
                                              size_t const stride,
                                              size_t const dilation);
@@ -100,21 +100,120 @@ namespace qant_native_computing_toolkit::ai
          *
          * @param npu_id The identifier of the NPU on which to perform the operation.
          * @param features: A 4D tensor with data type bfloat16 and shape (n_batches,
-         * n_channels_in, height, width)
-         * @param kernels: A 4D tensor with data type bfloat16 and shape (n_channels_in, n_channels_out, height, width)
+         * in_channels, height, width)
+         * @param weights: A 4D tensor with data type bfloat16 and shape (in_channels, out_channels, height, width)
          * @param padding: Amount of padding added to the input features.
-         * @param stride: Step size for moving the filter window over the input
+         * @param stride: Step size for moving the kernel over the input
          * features.
-         * @param dilation: Dilation ("zoom out") of the filter window.
+         * @param dilation: Dilation ("zoom out") of the kernel.
          * @param output_padding: Padding for the returned features.
-         * @return A 4D tensor containing the result of the transpose convolution with shape (n_batches, n_channels_out, height, width)
+         * @return A 4D tensor containing the result of the transpose convolution with shape (n_batches, out_channels, height_out, width_out)
          */
         DLManagedTensorVersioned *conv_transpose_fprop(const uint32_t npu_id, DLManagedTensorVersioned const *features,
-                                                       DLManagedTensorVersioned const *kernels,
+                                                       DLManagedTensorVersioned const *weights,
                                                        size_t const padding,
                                                        size_t const stride,
                                                        size_t const dilation,
                                                        size_t const output_padding);
+
+        /**
+         * @brief Opaque handle to convolution weights that have been uploaded to device memory.
+         *
+         * Instances are created by upload_conv_weights() and must be released exactly once
+         * with conv_weights_free(). Using a handle after it has been freed is undefined behavior.
+         */
+        typedef struct ConvWeightsHandle ConvWeightsHandle;
+
+        /**
+         * @brief Uploads convolution weights to device memory so they can be reused across
+         * multiple calls to conv_fprop_preloaded_weights().
+         *
+         * @param npu_id The identifier of the NPU on which the weights are stored.
+         * @param weights: A 4D tensor with data type bfloat16 and shape (out_channels,
+         * in_channels, height, width)
+         * @return An owning pointer to the weights handle, or NULL on error. The caller must
+         * release it with conv_weights_free().
+         */
+        ConvWeightsHandle *upload_conv_weights(const uint32_t npu_id, DLManagedTensorVersioned const *weights);
+
+        /**
+         * @brief Frees convolution weights previously uploaded with upload_conv_weights().
+         *
+         * @param handle The handle to free. Must not be used afterwards.
+         * @return 0 if successful, or a negative error code.
+         */
+        int conv_weights_free(ConvWeightsHandle *handle);
+
+        /**
+         * @brief Performs a forward pass through a convolution layer using weights already
+         * uploaded to device memory. The computation runs on the NPU that holds the weights.
+         *
+         * @param features: A 4D tensor with data type bfloat16 and shape (n_batches,
+         * in_channels, height, width)
+         * @param weights: Handle to the weights, as returned by upload_conv_weights().
+         * @param padding: Amount of padding added to the input features.
+         * @param stride: Step size for moving the kernel over the input
+         * features.
+         * @param dilation: Dilation ("zoom out") of the kernel.
+         * @return A 4D tensor containing the result of the convolution with shape (n_batches, out_channels, height_out, width_out)
+         */
+        DLManagedTensorVersioned *conv_fprop_preloaded_weights(DLManagedTensorVersioned const *features,
+                                                               ConvWeightsHandle const *weights,
+                                                               size_t const padding,
+                                                               size_t const stride,
+                                                               size_t const dilation);
+
+        /**
+         * @brief Opaque handle to transposed convolution weights that have been uploaded to
+         * device memory.
+         *
+         * Instances are created by upload_conv_transpose_weights() and must be released exactly
+         * once with conv_transpose_weights_free(). Using a handle after it has been freed is
+         * undefined behavior.
+         */
+        typedef struct ConvTransposeWeightsHandle ConvTransposeWeightsHandle;
+
+        /**
+         * @brief Uploads transposed convolution weights to device memory so they can be reused
+         * across multiple calls to conv_transpose_fprop_preloaded_weights().
+         *
+         * @param npu_id The identifier of the NPU on which the weights are stored.
+         * @param weights: A 4D tensor with data type bfloat16 and shape (in_channels, out_channels, height, width)
+         * @return An owning pointer to the weights handle, or NULL on error. The caller must
+         * release it with conv_transpose_weights_free().
+         */
+        ConvTransposeWeightsHandle *upload_conv_transpose_weights(const uint32_t npu_id,
+                                                                  DLManagedTensorVersioned const *weights);
+
+        /**
+         * @brief Frees transposed convolution weights previously uploaded with
+         * upload_conv_transpose_weights().
+         *
+         * @param handle The handle to free. Must not be used afterwards.
+         * @return 0 if successful, or a negative error code.
+         */
+        int conv_transpose_weights_free(ConvTransposeWeightsHandle *handle);
+
+        /**
+         * @brief Performs a forward pass through a transposed convolution layer using weights
+         * already uploaded to device memory. The computation runs on the NPU that holds the weights.
+         *
+         * @param features: A 4D tensor with data type bfloat16 and shape (n_batches,
+         * in_channels, height, width)
+         * @param weights: Handle to the weights, as returned by upload_conv_transpose_weights().
+         * @param padding: Amount of padding added to the input features.
+         * @param stride: Step size for moving the kernel over the input
+         * features.
+         * @param dilation: Dilation ("zoom out") of the kernel.
+         * @param output_padding: Padding for the returned features.
+         * @return A 4D tensor containing the result of the transpose convolution with shape (n_batches, out_channels, height_out, width_out)
+         */
+        DLManagedTensorVersioned *conv_transpose_fprop_preloaded_weights(DLManagedTensorVersioned const *features,
+                                                                         ConvTransposeWeightsHandle const *weights,
+                                                                         size_t const padding,
+                                                                         size_t const stride,
+                                                                         size_t const dilation,
+                                                                         size_t const output_padding);
 
         /**
          * @brief Performs a forward pass through a batchnorm2d layer
@@ -155,7 +254,7 @@ namespace qant_native_computing_toolkit::ai
          * @param kernel_height: Height of the pooling kernel.
          * @param kernel_width: Width of the pooling kernel.
          * @param padding: Amount of padding added to the input features.
-         * @param stride: Step size for moving the filter window over the input
+         * @param stride: Step size for moving the kernel over the input
          * features.
          * @return A 4D tensor containing the result of the maxpool operation with shape
          * ([batches], n_channels, output_height, output_width).
@@ -178,7 +277,7 @@ namespace qant_native_computing_toolkit::ai
          * @param kernel_height: Height of the pooling kernel.
          * @param kernel_width: Width of the pooling kernel.
          * @param padding: Amount of padding added to the input features.
-         * @param stride: Step size for moving the filter window over the input
+         * @param stride: Step size for moving the kernel over the input
          * features.
          * @param count_include_pad: When True, will include the zero-padding in the averaging calculation.
          * @return A 4D tensor with shape (n_batches, n_channels, height, width)

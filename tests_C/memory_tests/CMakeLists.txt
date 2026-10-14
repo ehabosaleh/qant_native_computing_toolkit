@@ -27,5 +27,6 @@ function(add_test_executable target_name source_file)
 endfunction()
 
 add_test_executable(test_memory_safety test_memory_safety.cpp)
-add_test_executable(test_memory_safety_i16 test_memory_safety_i16.cpp)
+add_test_executable(test_memory_safety_mul_elementwise test_memory_safety_mul_elementwise.cpp)
 add_test_executable(test_memory_safety_mat test_memory_safety_mat.cpp)
+add_test_executable(test_memory_safety_linear_fprop_preloaded test_memory_safety_linear_fprop_preloaded.cpp)

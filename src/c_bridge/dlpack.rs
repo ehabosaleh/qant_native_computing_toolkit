@@ -8,28 +8,13 @@ use std::{ffi::c_void, slice};
 
 use half::bf16;
 
-use crate::{
-    data_format_conversion::{fixeds_to_floats, floats_to_fixeds},
-    data_structures::QantTensor,
-    errors::ToolkitError,
-    toolkit_error,
-};
+use crate::{data_structures::QantTensor, errors::ToolkitError, toolkit_error};
 
 pub type ShapeType = i64;
 
-pub const DLDTYPE_I16: DLDataType = DLDataType {
-    code: DLDataTypeCode_kDLInt as u8,
-    bits: 16,
-    lanes: 1,
-};
 pub const DLDTYPE_BF16: DLDataType = DLDataType {
     code: DLDataTypeCode_kDLBfloat as u8,
     bits: 16,
-    lanes: 1,
-};
-pub const DLDTYPE_F32: DLDataType = DLDataType {
-    code: DLDataTypeCode_kDLFloat as u8,
-    bits: 32,
     lanes: 1,
 };
 
@@ -43,24 +28,6 @@ impl PartialEq for DLDevice {
     fn eq(&self, other: &Self) -> bool {
         self.device_id == other.device_id && self.device_type == other.device_type
     }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn delete_vector_managed_tensor_f32(self_: *mut DLManagedTensorVersioned) {
-    // bringing all data managing objects in scope
-    // so rust will call their destructors automatically at the end of this function
-    let dltensor_box = unsafe { Box::from_raw(self_) };
-    let dltensor = *dltensor_box;
-
-    // for a vector-backed tensor, the manager is the underlying vector
-    // the use is to go out of scope
-    #[allow(unused_variables)]
-    let ctx = unsafe { Box::from_raw(dltensor.manager_ctx as *mut Vec<f32>) };
-
-    // we also have to clean up the shape array
-    let ndim = dltensor.dl_tensor.ndim as usize;
-    #[allow(unused_variables)]
-    let shape_vec = unsafe { Vec::from_raw_parts(dltensor.dl_tensor.shape, ndim, ndim) };
 }
 
 fn delete_feature_managed_tensor<const D: usize>(self_: *mut DLManagedTensorVersioned) {
@@ -202,32 +169,20 @@ pub fn dltensor_to_qant_tensor<'a, const D: usize>(
     let shape_fixed: [usize; D] = to_usize_array::<D>(shape)?;
 
     let len_data: ShapeType = shape.iter().copied().product();
-    let arr: QantTensor<'a, D> = match tensor.dtype.code {
-        code if code == DLDataTypeCode_kDLBfloat as u8 => {
-            let data: &[bf16] =
-                unsafe { slice::from_raw_parts(tensor.data as *const bf16, len_data as usize) };
-            QantTensor::new(data, shape_fixed)?
-        }
-        code if code == DLDataTypeCode_kDLInt as u8 => {
-            let data: &[i16] =
-                unsafe { slice::from_raw_parts(tensor.data as *const i16, len_data as usize) };
-            QantTensor::new(fixeds_to_floats(data), shape_fixed)?
-        }
-        code => {
-            return Err(toolkit_error!(
-                "Invalid dtype, DLTensor has dtype.code {0:?}, only {DLDataTypeCode_kDLBfloat} and {DLDataTypeCode_kDLInt} supported",
-                code
-            ));
-        }
-    };
-
-    Ok(arr)
+    if tensor.dtype != DLDTYPE_BF16 {
+        return Err(toolkit_error!(
+            "Invalid dtype, {name} has dtype {0:?}, only {DLDTYPE_BF16:?} supported",
+            tensor.dtype
+        ));
+    }
+    let data: &[bf16] =
+        unsafe { slice::from_raw_parts(tensor.data as *const bf16, len_data as usize) };
+    QantTensor::new(data, shape_fixed)
 }
 
 pub fn qant_tensor_to_dltensor<const D: usize>(
     qant_tensor: QantTensor<D>,
     device: DLDevice,
-    dtype: DLDataType,
 ) -> Result<DLManagedTensorVersioned, ToolkitError> {
     let shape: Vec<ShapeType> = qant_tensor
         .shape()
@@ -235,40 +190,14 @@ pub fn qant_tensor_to_dltensor<const D: usize>(
         .map(|&x| x as ShapeType)
         .collect();
 
-    let (arr_ptr, manager_ctx) = match dtype.code {
-        code if code == DLDataTypeCode_kDLBfloat as u8 => (
-            qant_tensor.data().as_ptr() as *mut c_void,
-            Box::into_raw(Box::new(qant_tensor)) as *mut c_void,
-        ),
-        code if code == DLDataTypeCode_kDLInt as u8 => {
-            if D != 1 {
-                return Err(toolkit_error!(
-                    "only 1D tensors can be converted to int16 DLTensors, got {D}D tensor"
-                ));
-            }
-            let qant_tensor_buffer = QantTensor::new(
-                bytemuck::try_cast_vec(floats_to_fixeds(qant_tensor.data()))
-                    .map_err(|_| toolkit_error!("Failed to cast data buffer"))?,
-                [shape.iter().product::<ShapeType>() as usize],
-            )?;
-            (
-                qant_tensor_buffer.data().as_ptr() as *mut c_void,
-                Box::into_raw(Box::new(qant_tensor_buffer)) as *mut c_void,
-            )
-        }
-        code => {
-            return Err(toolkit_error!(
-                "Invalid dtype, DLTensor has dtype.code {0:?}, only {DLDataTypeCode_kDLBfloat} and {DLDataTypeCode_kDLInt} supported",
-                code
-            ));
-        }
-    };
+    let arr_ptr = qant_tensor.data().as_ptr() as *mut c_void;
+    let manager_ctx = Box::into_raw(Box::new(qant_tensor)) as *mut c_void;
 
     let tensor = DLTensor {
         data: arr_ptr,
         device,
         ndim: shape.len() as i32,
-        dtype,
+        dtype: DLDTYPE_BF16,
         shape: shape.as_ptr() as *mut ShapeType,
         strides: std::ptr::null::<ShapeType>() as *mut ShapeType,
         byte_offset: 0,

@@ -32,7 +32,7 @@ env:
 
 jobs:
   build_deb:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       matrix:
@@ -89,7 +89,7 @@ jobs:
           retention-days: 1
 
   test_deb:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build_deb
     timeout-minutes: 15
     strategy:
@@ -177,7 +177,7 @@ jobs:
           retention-days: 14
 
   upload_deb:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: test_deb
     # The default (real-driver) build only exists on trusted runs; skip on cpu-backend-only (fork) runs.
     if: ${{ contains(fromJSON(inputs.features), 'default') }}

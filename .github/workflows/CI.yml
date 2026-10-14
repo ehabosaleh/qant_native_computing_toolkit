@@ -15,17 +15,17 @@ env:
   # 'release' (pinned by tag) or 'artifact' (pinned by run id)
   DRIVER_SOURCE: release 
   # release tag, used when DRIVER_SOURCE=release      
-  DRIVER_VERSION: v2.3.1
+  DRIVER_VERSION: v2.4.0
   # driver workflow run id, used when DRIVER_SOURCE=artifact    
-  # -> https://github.com/Q-ANT-GmbH/qant_native_computing_driver/actions/runs/29239220125
-  DRIVER_RUN_ID: "29239220125"            
+  # -> https://github.com/Q-ANT-GmbH/qant_native_computing_driver/actions/runs/36992977797
+  DRIVER_RUN_ID: "36992977797"
   
 
 jobs:
   # If the repo does not have access to the driver, do not run tests that require the driver.
   # IF there is access to the driver, pass the version to the individual workflows.
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       features: ${{ steps.check_driver_available.outputs.features }}
       driver_source: ${{ steps.pin_driver_version.outputs.source }}
